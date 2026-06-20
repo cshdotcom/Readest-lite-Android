@@ -29,12 +29,16 @@
 
 ## 下载现成 APK
 
-如果你只是想用现成的（内置某个示例站点），可以从 [Releases](https://github.com/cshdotcom/Readest-lite-Android/releases) 页面下载：
+APK 公开下载入口在独立的发行仓库：
+
+📦 **https://github.com/cshdotcom/Readest-Lite-Android-Releases/releases**
 
 - `readest-lite-arm64-v8a-release.apk` — 64 位 ARM，**绝大多数现代手机用这个**
 - `readest-lite-armeabi-v7a-release.apk` — 32 位 ARM，老机型备用
 
-**但是！** 仓库内的 Release APK 是仓库作者用自己的阅读站点地址编译的。你要用自己部署的阅读站点，必须按下面教程重新编译。这就是本项目的设计：硬编码地址，每个用户自己编译自己的版本。
+**但是！** 这些 APK 是仓库作者用自己的阅读站点地址编译的。你要用自己部署的阅读站点，必须按下面教程重新编译。这就是本项目的设计：硬编码地址，每个用户自己编译自己的版本。
+
+> 💡 本仓库（`Readest-lite-Android`）只放源代码；发行 APK 单独放在 [`Readest-Lite-Android-Releases`](https://github.com/cshdotcom/Readest-Lite-Android-Releases) 仓库，方便不想看源码的用户直接下载。
 
 ---
 
