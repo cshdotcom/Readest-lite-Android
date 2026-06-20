@@ -81,8 +81,9 @@ class MainActivity : TauriActivity() {
 
         /**
          * 剪贴板分享链接匹配：HOME_URL 域名 或 readest:// 深链，任一命中即弹窗。
-         * - https://YOUR_READER_DOMAIN.example.com/... 或 https://YOUR_READER_DOMAIN.example.com/#/share/xxx
-         * - readest://share/xxx
+         * - https://YOUR_READER_DOMAIN.example.com/s/ID        ← Readest 网页内"分享"按钮复制的格式
+         * - https://YOUR_READER_DOMAIN.example.com/...        ← 同域名任意路径
+         * - readest://share/ID                  ← App 深链格式
          */
         private val SHARE_LINK_REGEX: Regex by lazy {
             val host = try {
@@ -101,6 +102,12 @@ class MainActivity : TauriActivity() {
 
         /** JavascriptInterface 名称，注入给 WebView 用于回传 blob 数据 */
         private const val BLOB_BRIDGE_NAME = "AndroidBlobDownloader"
+
+        /** JavascriptInterface 名称，注入给错误页用于触发重新加载 */
+        private const val ERROR_PAGE_BRIDGE_NAME = "AndroidErrorPage"
+
+        /** 错误页 URL 标记，用于在 onPageFinished 识别"当前在错误页" */
+        private const val ERROR_PAGE_URL = "about:error-page"
 
         private data class PendingDownload(
             val url: String,
@@ -225,6 +232,20 @@ class MainActivity : TauriActivity() {
     private lateinit var fileChooserLauncher: ActivityResultLauncher<Array<String>>
     private var pendingDownload: PendingDownload? = null
     private var coldStartDone = false
+
+    /**
+     * 当前是否正在加载自定义错误页。用于防止 onReceivedError 死循环：
+     * 错误页本身也可能加载失败（虽然不太可能，因为它是 data: URL），如果失败，
+     * 不要再次触发错误页加载。
+     */
+    @Volatile
+    private var isLoadingErrorPage = false
+
+    /**
+     * 上一次加载失败的 URL，用于"重新加载"按钮。如果为空则用 HOME_URL。
+     */
+    @Volatile
+    private var lastFailedUrl: String? = null
 
     // =====================================================================================
     // Lifecycle
@@ -839,15 +860,36 @@ class MainActivity : TauriActivity() {
     }
 
     /**
-     * readest://share/ID  →  HOME_URL + #/share/ID
-     * readest://PATH      →  HOME_URL + #/PATH
+     * 深链转 web URL。Readest 实际分享链接格式为 `https://reader.example.com/s/{ID}`，
+     * 因此深链规则：
+     *   readest://share/ID       →  HOME_URL + /s/ID
+     *   readest://share/ID?q=1   →  HOME_URL + /s/ID?q=1
+     *   readest://PATH           →  HOME_URL + /PATH  （兼容其他路径）
+     *
+     * 注意：HOME_URL 末尾不带斜杠（如 https://YOUR_READER_DOMAIN.example.com）。
      */
     private fun convertReadestDeepLink(uri: Uri): String {
         val host = uri.host ?: ""
         val path = uri.path ?: ""
         val query = uri.query?.let { "?$it" } ?: ""
         val fragment = uri.fragment?.let { "#$it" } ?: ""
-        val composed = if (path.startsWith("/")) "$host$path$query$fragment" else "$host/$path$query$fragment"
-        return "$HOME_URL/#/$composed"
+
+        // 拼接 path：readest://share/ID  →  host="share", path="/ID"
+        // 我们要的最终 URL 是 HOME_URL + "/s/ID"
+        val composed = when {
+            // host == "share" 且 path 形如 "/ID"：转成 /s/ID
+            host.equals("share", ignoreCase = true) && path.startsWith("/") -> {
+                "/s" + path + query + fragment
+            }
+            // host == "share" 且 path 为空：直接转成 /s
+            host.equals("share", ignoreCase = true) && path.isEmpty() -> {
+                "/s" + query + fragment
+            }
+            // 其他 host（如 readest://books/xxx）：原样拼接成 /host/path
+            path.startsWith("/") -> "/$host$path$query$fragment"
+            path.isNotEmpty() -> "/$host/$path$query$fragment"
+            else -> "/$host$query$fragment"
+        }
+        return HOME_URL.trimEnd('/') + composed
     }
 }
