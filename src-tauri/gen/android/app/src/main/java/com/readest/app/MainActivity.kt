@@ -221,6 +221,154 @@ class MainActivity : TauriActivity() {
   bridge.log('[BlobDownload] intercept script installed');
 })();
 """
+
+        /**
+         * 错误页 HTML 模板。占位符：
+         * - {{ERROR_DESC}}  → 错误描述（已转义）
+         * - {{FAILED_URL}}  → 失败的 URL（已转义）
+         *
+         * 视觉设计：
+         * - 浅灰背景 + 白色卡片，居中
+         * - 断网书本 SVG 图标（带轻微浮动动画）
+         * - "加载失败" 大标题
+         * - 错误描述小字
+         * - 失败 URL 灰色小字（可点击复制）
+         * - 大圆角"重新加载"按钮（深色背景，hover/active 反馈）
+         *
+         * "重新加载"按钮调 AndroidErrorPage.reload() 回到 Kotlin 触发 webView.loadUrl(lastFailedUrl)。
+         */
+        private const val ERROR_PAGE_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>加载失败</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #f5f7fa;
+    font-family: -apple-system, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    color: #2c3e50;
+    -webkit-font-smoothing: antialiased;
+  }
+  .container {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    min-height: 100vh; padding: 32px 24px;
+    text-align: center;
+  }
+  .icon {
+    width: 96px; height: 96px;
+    margin-bottom: 24px;
+    animation: float 3s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-8px); }
+  }
+  .title {
+    font-size: 22px; font-weight: 600;
+    color: #1a202c; margin: 0 0 12px 0;
+    letter-spacing: 0.02em;
+  }
+  .desc {
+    font-size: 14px; color: #718096;
+    margin: 0 0 8px 0; line-height: 1.6;
+    word-break: break-all; max-width: 320px;
+  }
+  .url {
+    font-size: 12px; color: #a0aec0;
+    margin: 0 0 32px 0; line-height: 1.5;
+    word-break: break-all; max-width: 320px;
+    font-family: -apple-system, "SF Mono", "Menlo", monospace;
+    padding: 8px 12px; background: #edf2f7;
+    border-radius: 6px;
+  }
+  .btn-reload {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 8px;
+    min-width: 200px; height: 52px;
+    padding: 0 32px;
+    background: #2c3e50; color: #fff;
+    border: none; border-radius: 26px;
+    font-size: 16px; font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    box-shadow: 0 4px 12px rgba(44, 62, 80, 0.25);
+  }
+  .btn-reload:active {
+    transform: scale(0.97);
+    background: #1a202c;
+    box-shadow: 0 2px 6px rgba(44, 62, 80, 0.3);
+  }
+  .btn-reload svg {
+    width: 18px; height: 18px;
+  }
+  .spinner {
+    display: none;
+    width: 18px; height: 18px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  .btn-reload.loading .btn-label,
+  .btn-reload.loading .btn-icon { display: none; }
+  .btn-reload.loading .spinner { display: inline-block; }
+  .btn-reload.loading { pointer-events: none; opacity: 0.85; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <svg class="icon" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="bookGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#a0aec0"/>
+          <stop offset="1" stop-color="#718096"/>
+        </linearGradient>
+      </defs>
+      <rect x="14" y="14" width="68" height="68" rx="14" fill="url(#bookGrad)"/>
+      <path d="M28 36 L48 32 L68 36 L68 64 L48 60 L28 64 Z" fill="#fff"/>
+      <path d="M48 32 L48 60" stroke="#cbd5e0" stroke-width="2"/>
+      <circle cx="78" cy="22" r="8" fill="#fc8181"/>
+      <path d="M74 22 L82 22 M78 18 L78 26" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    <h1 class="title">加载失败</h1>
+    <p class="desc">{{ERROR_DESC}}</p>
+    <p class="url">{{FAILED_URL}}</p>
+    <button class="btn-reload" id="btnReload" onclick="onReloadClick()">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M23 4v6h-6"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+      <span class="btn-label">重新加载</span>
+      <span class="spinner"></span>
+    </button>
+  </div>
+<script>
+  function onReloadClick() {
+    var btn = document.getElementById('btnReload');
+    if (btn.classList.contains('loading')) return;
+    btn.classList.add('loading');
+    try {
+      window.AndroidErrorPage.reload();
+    } catch (e) {
+      // bridge 不可用，2 秒后恢复按钮
+      setTimeout(function() { btn.classList.remove('loading'); }, 2000);
+    }
+  }
+  // 防止意外下拉刷新
+  document.addEventListener('touchmove', function(e) {
+    if (e.touches.length > 1) e.preventDefault();
+  }, { passive: false });
+</script>
+</body>
+</html>"""
     }
 
     /** 禁用 WryActivity 默认返回键逻辑，自己实现 */
@@ -422,10 +570,12 @@ class MainActivity : TauriActivity() {
         // 注意：wry 之前调过 addJavascriptInterface(ipc, "ipc")，我们用不同的名字
         // AndroidBlobDownloader，避免冲突。
         wv.addJavascriptInterface(BlobDownloadBridge(wv), BLOB_BRIDGE_NAME)
+        // 注入错误页桥：错误页里"重新加载"按钮通过它回调 Kotlin 触发 webView.reload()
+        wv.addJavascriptInterface(ErrorPageBridge(), ERROR_PAGE_BRIDGE_NAME)
         // 注入拦截脚本（在每个页面加载前/后执行）
         wv.evaluateJavascript(BLOB_INTERCEPT_SCRIPT, null)
 
-        Log.i(TAG, "custom clients installed (with blob download bridge)")
+        Log.i(TAG, "custom clients installed (with blob download bridge + error page bridge)")
     }
 
     // =====================================================================================
@@ -488,6 +638,11 @@ class MainActivity : TauriActivity() {
 
         override fun onPageFinished(view: WebView?, url: String?) {
             super.onPageFinished(view, url)
+            // 错误页加载完成：不再重置 firstPageLoaded，也不注入 blob 脚本
+            if (url == ERROR_PAGE_URL) {
+                isLoadingErrorPage = false  // 错误页已稳定显示，重置标志
+                return
+            }
             // 首页加载完成后清空历史，让返回键的"页面栈仅剩主页"判定生效
             if (!firstPageLoaded && url != null && (url == HOME_URL || url.startsWith(HOME_URL))) {
                 view?.post {
@@ -506,9 +661,127 @@ class MainActivity : TauriActivity() {
             error: android.webkit.WebResourceError?
         ) {
             super.onReceivedError(view, request, error)
-            if (request?.isForMainFrame == true) {
-                Log.e(TAG, "main frame error: ${error?.description} (${request.url})")
+            // 仅处理主框架错误（图片/CSS/JS 等子资源错误忽略，不显示错误页）
+            if (request?.isForMainFrame != true) return
+
+            val failedUrl = request.url?.toString() ?: ""
+            val desc = error?.description?.toString() ?: "未知错误"
+            Log.e(TAG, "main frame error: $desc ($failedUrl)")
+
+            // 防循环：错误页本身加载失败不再加载错误页
+            if (failedUrl == ERROR_PAGE_URL) return
+            if (isLoadingErrorPage) return
+
+            // 记录失败 URL（用于"重新加载"按钮），加载错误页
+            lastFailedUrl = failedUrl.ifBlank { HOME_URL }
+            loadErrorPage(view, desc, failedUrl)
+        }
+
+        // 兼容旧版 API（< 23）的 onReceivedError，主框架无 URL 信息时也兜底
+        @Deprecated("Deprecated in Java", ReplaceWith("super.onReceivedError(view, errorCode, description, failingUrl)"))
+        override fun onReceivedError(
+            view: WebView?,
+            errorCode: Int,
+            description: String?,
+            failingUrl: String?
+        ) {
+            super.onReceivedError(view, errorCode, description, failingUrl)
+            // 仅在主框架错误时处理（这个回调没有 isForMainFrame 信息，用 errorCode 粗判）
+            // 主要错误码：-2 (HOST_LOOKUP), -6 (CONNECT), -8 (TIMEOUT), -14 (FAILED_SSL_HANDSHAKE) 等
+            if (failingUrl == null || failingUrl == ERROR_PAGE_URL) return
+            if (isLoadingErrorPage) return
+
+            Log.e(TAG, "legacy main frame error: code=$errorCode, desc=$description, url=$failingUrl")
+            lastFailedUrl = failingUrl
+            loadErrorPage(view, description ?: "网络错误", failingUrl)
+        }
+
+        /**
+         * HTTP 错误（4xx/5xx）：仅主框架错误时显示错误页。
+         * 注意：404 等通常服务端已经返回了 HTML，这里只在没有响应体或明显错误时介入。
+         * 为避免误判覆盖服务端正常返回的 404 页面，HTTP 错误只在 5xx 时显示自定义错误页。
+         */
+        override fun onReceivedHttpError(
+            view: WebView?,
+            request: WebResourceRequest?,
+            errorResponse: android.webkit.WebResourceResponse?
+        ) {
+            super.onReceivedHttpError(view, request, errorResponse)
+            if (request?.isForMainFrame != true) return
+            val statusCode = errorResponse?.statusCode ?: return
+            // 仅 5xx 服务端错误显示自定义错误页；4xx 让服务端 HTML 正常显示
+            if (statusCode < 500) return
+
+            val failedUrl = request.url?.toString() ?: ""
+            if (failedUrl == ERROR_PAGE_URL || isLoadingErrorPage) return
+
+            val desc = "服务器错误 ($statusCode)"
+            Log.e(TAG, "main frame http error: $statusCode ($failedUrl)")
+            lastFailedUrl = failedUrl.ifBlank { HOME_URL }
+            loadErrorPage(view, desc, failedUrl)
+        }
+    }
+
+    /**
+     * 加载自定义错误页。用 loadDataWithBaseURL 加载内联 HTML，避免再发网络请求。
+     * baseUrl 设为 ERROR_PAGE_URL，便于 onPageFinished 识别。
+     */
+    private fun loadErrorPage(view: WebView?, errorDesc: String, failedUrl: String) {
+        if (view == null) return
+        isLoadingErrorPage = true
+        val html = buildErrorPageHtml(errorDesc, failedUrl)
+        view.post {
+            view.loadDataWithBaseURL(ERROR_PAGE_URL, html, "text/html", "UTF-8", ERROR_PAGE_URL)
+        }
+    }
+
+    /**
+     * 错误页 HTML 模板。纯 HTML/CSS/JS，无外部依赖。
+     * 视觉风格：浅灰背景 + 断网书本 SVG 图标 + "加载失败"标题 + 错误描述 + 大圆角按钮"重新加载"。
+     * "重新加载"按钮调 AndroidErrorPage.reload() 触发 Kotlin 侧 webView.reload()。
+     */
+    private fun buildErrorPageHtml(errorDesc: String, failedUrl: String): String {
+        // 转义 HTML 特殊字符，避免注入
+        val safeDesc = errorDesc
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("\"", "&quot;")
+            .replace("'", "&#39;")
+        val safeUrl = failedUrl
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+
+        return ERROR_PAGE_HTML
+            .replace("{{ERROR_DESC}}", safeDesc)
+            .replace("{{FAILED_URL}}", safeUrl)
+    }
+
+    // =====================================================================================
+    // 错误页桥：JS → Kotlin 触发重新加载
+    // =====================================================================================
+
+    /**
+     * JavascriptInterface，注入到 WebView 中供错误页 JS 调用。
+     * 错误页的"重新加载"按钮通过 AndroidErrorPage.reload() 回调到 Kotlin，
+     * 在主线程触发 webView.reload() 或 webView.loadUrl(lastFailedUrl)。
+     */
+    inner class ErrorPageBridge {
+        @JavascriptInterface
+        fun reload() {
+            Log.i(TAG, "error page: reload button clicked, loading $lastFailedUrl")
+            val target = lastFailedUrl ?: HOME_URL
+            webView?.post {
+                isLoadingErrorPage = false
+                webView?.loadUrl(target)
             }
+        }
+
+        /** 调试用：JS 端可以调这个方法打印日志到 logcat */
+        @JavascriptInterface
+        fun log(msg: String) {
+            Log.i(TAG, "[ErrorPage-JS] $msg")
         }
     }
 
