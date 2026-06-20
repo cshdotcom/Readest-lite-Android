@@ -116,21 +116,48 @@ cd Readest-lite-Android
 npm install
 ```
 
-### 5. ⚠️ 修改硬编码首页地址（关键步骤！）
+### 5. ⚠️ 修改硬编码首页地址（关键步骤！必须改两处）
 
-编辑 `src-tauri/gen/android/app/src/main/java/com/readest/app/MainActivity.kt`，找到这一行（约第 68 行）：
+这个 App 把首页地址硬编码在两个地方，**两处必须改成同一个 URL**，否则会白屏。
+
+#### 第一处：`src-tauri/tauri.conf.json`
+
+找到 `app.windows[0].url` 字段：
+
+```json
+"windows": [
+  {
+    "title": "阅读",
+    "url": "https://YOUR_READER_DOMAIN.example.com"
+  }
+]
+```
+
+改成你的地址，例如：
+
+```json
+"url": "https://my-reader.example.com"
+```
+
+**这处决定 Tauri 启动时 WebView 实际加载的 URL**（Rust 侧编译期写入 .so）。
+
+#### 第二处：`src-tauri/gen/android/app/src/main/java/com/readest/app/MainActivity.kt`
+
+找到 `HOME_URL` 常量（约第 74 行）：
 
 ```kotlin
 private const val HOME_URL = "https://YOUR_READER_DOMAIN.example.com"
 ```
 
-把它改成你自己的阅读站点地址，例如：
+改成和第一处一样的地址：
 
 ```kotlin
 private const val HOME_URL = "https://my-reader.example.com"
 ```
 
-**就改这一行，其他什么都不用动。** 剪贴板分享链接的域名匹配会自动从 `HOME_URL` 解析 host，无需另外配置。
+**这处用于 Kotlin 侧的深链转换、剪贴板域名匹配、加载兜底**。剪贴板分享链接的域名匹配会自动从 `HOME_URL` 解析 host，无需另外配置。
+
+> ⚠️ **两处必须完全一致**，包括 `https://` 还是 `http://`、是否带末尾 `/`、域名大小写。建议直接复制粘贴。
 
 #### 同时建议修改的（可选）
 
@@ -268,14 +295,38 @@ Readest-lite-Android/
 
 整个 App 90% 的逻辑都在这里。关键代码段：
 
-- **`HOME_URL` 常量**：你唯一需要改的地方
-- **`configureWebView()`**：WebView 完整配置（JS、DOM Storage、Cookie、本地文件访问等）
+- **`HOME_URL` 常量**：你**必须改**的地方之一（另一个在 `tauri.conf.json`）
+- **`configureWebSettings()`**：WebView 完整配置（JS、DOM Storage、Cookie、本地文件访问等）
+- **`installCustomClients()`**：设置自定义 WebViewClient / WebChromeClient / DownloadListener
+  - ⚠️ **必须用 `webView.post { }` 推迟调用**，否则会被 wry 在 `onWebViewCreate` 之后设置的 `RustWebViewClient` / `RustWebChromeClient` 覆盖，导致白屏
+- **`onWebViewCreate()`**：Tauri 创建完 RustWebView 后的回调，在这里接管 WebView
 - **`ShellWebViewClient`**：URL 路由 / `_blank` 拦截 / 历史栈管理
 - **`ShellWebChromeClient`**：文件上传选择器
 - **`ShellDownloadListener`**：文件下载（DownloadManager 落盘）
 - **`checkClipboardForShareLink()`**：剪贴板检测 + 弹窗
 - **`onBackPressedDispatcher`**：返回键栈逻辑 + 退出确认
 - **`convertReadestDeepLink()`**：`readest://` 深链转换
+
+#### ⚠️ wry 初始化时序（重要，避免白屏）
+
+Tauri Android 底层用 wry 创建 WebView，初始化顺序是：
+
+```
+1. wry 创建 RustWebView
+2. wry 调用 activity.setWebView(webview)  ← onWebViewCreate 在这里
+3. wry 调用 webview.loadUrl(初始URL)       ← 加载 tauri.conf.json 配置的 url
+4. wry 创建并 setWebViewClient(RustWebViewClient)  ← 会覆盖你的 client
+5. wry 调用 setWebChromeClient(RustWebChromeClient) ← 会覆盖你的 chrome client
+6. wry 调用 addJavascriptInterface(ipc)
+7. wry 调用 setContentView(webview)
+```
+
+**所以 `onWebViewCreate` 里直接 `setWebViewClient` 会被步骤 4/5 覆盖**，导致自定义 URL 拦截、文件上传、下载等全部失效，WebView 卡在初始页白屏。
+
+本项目的解决方案：
+1. `tauri.conf.json` 把 `app.windows[0].url` 设为你的阅读站点 External URL，让 wry 在步骤 3 直接加载 HOME_URL（而不是 `tauri://localhost`）
+2. `onWebViewCreate` 里用 `webView.post { installCustomClients(webView) }` 把 client 设置推迟到下一个事件循环，等 wry 步骤 4/5 执行完后再覆盖回来
+3. post 里还做了兜底：如果当前 URL 仍是 `tauri://` 或 `about:blank`，强制 `loadUrl(HOME_URL)`
 
 ### `ClipboardMemory.kt`
 
@@ -321,12 +372,14 @@ pkill -f tauri; pkill -f gradle; pkill -f kotlin
 
 ### Q3. APK 装上后白屏
 
-检查你的阅读站点是否：
-1. HTTPS 可访问（系统 WebView 默认拒绝 http 明文）
-2. 没有强制要求某个特定 User-Agent
-3. 控制台无 JS 报错（用 `chrome://inspect` 远程调试看）
+按优先级排查：
 
-如果一定要加载 http 站点，修改 `AndroidManifest.xml` 的 `usesCleartextTraffic` 为 `"true"`（已在 debug 构建默认开启）。
+1. **两处 URL 是否一致**：`tauri.conf.json` 的 `app.windows[0].url` 和 `MainActivity.kt` 的 `HOME_URL` **必须完全一致**（包括 `https://` / 末尾 `/` / 大小写）。两处不一致是最常见的白屏原因。
+2. **是否忘记重新编译**：改了 `tauri.conf.json` 后必须重新跑 `tauri android build`，因为 URL 是编译期写入 `.so` 的。
+3. **是否清理了旧 jniLibs**：如果之前编译过，删掉 `src-tauri/gen/android/app/src/main/jniLibs/` 再重新编译，否则可能用旧的 .so。
+4. **站点是否 HTTPS 可访问**：系统 WebView 默认拒绝 http 明文。如果一定要加载 http 站点，修改 `AndroidManifest.xml` 的 `usesCleartextTraffic` 为 `"true"`（debug 构建已默认开启）。
+5. **是否被 wry 的 client 覆盖**：如果你修改了 `onWebViewCreate`，确保 `installCustomClients` 是用 `webView.post { }` 推迟调用的，不能直接同步调用。详见上文「wry 初始化时序」章节。
+6. **远程调试看 JS 报错**：用 `chrome://inspect`（Chrome 浏览器地址栏）连接 App 的 WebView，看 console 有没有 JS 异常。
 
 ### Q4. 剪贴板检测不生效
 

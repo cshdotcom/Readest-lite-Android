@@ -10,7 +10,8 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "阅读"
+        "title": "阅读",
+        "url": "https://YOUR_READER_DOMAIN.example.com"
       }
     ],
     "security": {
