@@ -387,16 +387,55 @@ pkill -f tauri; pkill -f gradle; pkill -f kotlin
 
 ### Q4. 剪贴板检测不生效
 
-- 仅 App **冷启动** / **从后台切回前台** 时检测，运行中复制不会触发
-- 剪贴板必须包含 `http://` 或 `https://` 开头的完整 URL
-- URL 必须包含你 `HOME_URL` 的 host（例如 `HOME_URL=https://my-reader.example.com` 则剪贴板 URL 必须包含 `my-reader.example.com`）
-- 同一链接本次进程只弹一次，要再弹必须完全退出 App（系统任务管理器划掉）后重启
+排查步骤：
 
-### Q5. 文件下载失败
+1. **触发时机**：仅在 App **冷启动** 或 **从后台切回前台** 时检测。App 在前台运行时复制不会触发。
+2. **匹配规则**：剪贴板文本必须包含以下任一形式的链接：
+   - `https://你的HOME_URL域名/...`（例如 `https://my-reader.example.com/#/share/xxx`）
+   - `readest://share/xxx` 深链
+3. **进程内去重**：同一链接本次进程只弹一次。要再弹必须**完全退出 App**（系统任务管理器划掉）后重新打开，或者复制一个**不同的链接**。
+4. **查看日志**：用 `adb logcat -s ReadestShell` 过滤日志，能看到详细的检测过程：
+   - `clipboard raw (first 100 chars): ...` — 读到的剪贴板原文
+   - `clipboard extracted url: ...` — 提取出的 URL
+   - `clipboard: URL does not match share link regex (...)` — URL 不匹配（regex 也会打印出来）
+   - `clipboard: already shown this URL in this process, skip` — 进程内已弹过，跳过
+   - `clipboard: showing share link dialog for ...` — 即将弹窗
 
-- API ≤ 28 需要存储权限，App 会在首次下载时弹权限请求
-- API 29+ 走系统 DownloadManager 公共 Download 目录，无需权限
-- 下载进度看通知栏
+   如果日志显示 `primaryClip is null`，是 Android 系统限制（某些设备/版本不允许后台 App 读剪贴板）；切到前台后会重试。
+
+5. **常见不弹窗原因**：
+   - 复制时 App 还在前台 → 切到后台再切回来才会触发
+   - 复制的链接域名和 `HOME_URL` 不一致 → 检查 `HOME_URL` 配置
+   - 之前已经弹过同一个链接 → 杀掉 App 重开
+
+### Q5. 文件下载失败 / blob 下载
+
+阅读站点（如 Readest）导出 EPUB/PDF 时通常用 `Blob` + `URL.createObjectURL(blob)` 生成 `blob:https://...` 链接触发下载。系统 `DownloadManager` 不认识 `blob:` 协议，直接交给它会下载失败。
+
+本 App 的处理方式：
+
+1. **注入 JS 拦截脚本**（在 `onPageFinished` 后注入）：劫持 `<a download>` 点击和 `HTMLAnchorElement.prototype.click`
+2. **JS 读取 blob 数据**：`fetch(blobUrl) → response.blob() → FileReader.readAsDataURL → base64`
+3. **通过 `@JavascriptInterface` 回传 Kotlin**：`AndroidBlobDownloader.saveBlob(fileName, mime, base64)`
+4. **Kotlin 解码写入 Download 目录**：`Base64.decode` → 写文件 → 通知 `MediaScanner`
+
+支持的下载类型：
+- ✅ `blob:` URL（Readest 导出 EPUB 走这条路径）
+- ✅ `data:` URL（base64 内联）
+- ✅ `https:` / `http:` URL（走系统 DownloadManager）
+- ✅ 文件名自动补扩展名（如 `application/epub+zip` → `.epub`）
+
+排查方法：
+- 用 `adb logcat -s ReadestShell` 看日志，会看到：
+  - `[JS] [BlobDownload] intercept script installed` — 拦截脚本已注入
+  - `[JS] [BlobDownload] intercepted <a download> click: blob:...` — 拦截到下载点击
+  - `saveBlob: fileName=xxx.epub, mime=application/epub+zip, base64Length=...` — Kotlin 收到数据
+  - `blob/data saved: /storage/emulated/0/Download/xxx.epub (12345 bytes)` — 文件已写入
+- 如果看到 `bridge not found`：JavascriptInterface 注入失败，检查 `addJavascriptInterface` 调用时机
+- 如果看到 `fetch error`：blob URL 已被 revoke（网页代码 `URL.revokeObjectURL(url)` 调得太早），这种是网页 bug
+- 文件保存位置：`/storage/emulated/0/Download/`，用系统文件管理器可见
+
+API ≤ 28 首次下载会请求 `WRITE_EXTERNAL_STORAGE` 权限；API 29+ 直接写入公共 Download 目录，无需权限。
 
 ### Q6. 想让 App 支持横屏
 

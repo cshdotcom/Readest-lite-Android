@@ -11,9 +11,11 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.util.Base64
 import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
+import android.webkit.JavascriptInterface
 import android.webkit.URLUtil
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
@@ -32,6 +34,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import java.io.File
+import java.io.FileOutputStream
 import kotlin.system.exitProcess
 
 /**
@@ -75,16 +79,28 @@ class MainActivity : TauriActivity() {
          */
         private const val HOME_URL = "https://YOUR_READER_DOMAIN.example.com"
 
-        /** 剪贴板匹配域名（从 HOME_URL 自动派生） */
+        /**
+         * 剪贴板分享链接匹配：HOME_URL 域名 或 readest:// 深链，任一命中即弹窗。
+         * - https://YOUR_READER_DOMAIN.example.com/... 或 https://YOUR_READER_DOMAIN.example.com/#/share/xxx
+         * - readest://share/xxx
+         */
         private val SHARE_LINK_REGEX: Regex by lazy {
             val host = try {
                 Uri.parse(HOME_URL).host?.replace(".", "\\.") ?: ""
             } catch (_: Exception) { "" }
-            Regex(host)
+            // host 为空时只匹配深链；否则两者都匹配
+            if (host.isEmpty()) {
+                Regex("readest://", RegexOption.IGNORE_CASE)
+            } else {
+                Regex("$host|readest://", RegexOption.IGNORE_CASE)
+            }
         }
 
         private const val DEEP_LINK_SCHEME = "readest"
         private const val REQ_STORAGE = 10086
+
+        /** JavascriptInterface 名称，注入给 WebView 用于回传 blob 数据 */
+        private const val BLOB_BRIDGE_NAME = "AndroidBlobDownloader"
 
         private data class PendingDownload(
             val url: String,
@@ -93,6 +109,111 @@ class MainActivity : TauriActivity() {
             val mimetype: String,
             val contentLength: Long
         )
+
+        /**
+         * 注入到 WebView 的 JS 拦截脚本。
+         *
+         * 拦截策略：
+         * 1. 监听 document 的 click 事件（捕获阶段），拦截 <a download> 点击
+         * 2. 劫持 HTMLAnchorElement.prototype.click（有些库直接调 a.click()）
+         * 3. 拦截到 blob: 或 data: URL 后，fetch 出 Blob，FileReader.readAsDataURL 转 base64
+         * 4. 通过 AndroidBlobDownloader.saveBlob(fileName, mime, base64) 回传给 Kotlin 写文件
+         *
+         * 幂等：用 window.__blobIntercepted 标记防止重复注入。
+         */
+        private const val BLOB_INTERCEPT_SCRIPT = """
+(function() {
+  if (window.__blobIntercepted) return;
+  window.__blobIntercepted = true;
+
+  var bridge = window.AndroidBlobDownloader;
+  if (!bridge) { console.warn('[BlobDownload] bridge not found'); return; }
+
+  function readAsBase64(url, cb) {
+    try {
+      fetch(url).then(function(resp) {
+        return resp.blob();
+      }).then(function(blob) {
+        var reader = new FileReader();
+        reader.onloadend = function() {
+          var dataUrl = reader.result || '';
+          var idx = dataUrl.indexOf(',');
+          if (idx < 0) { bridge.log('[BlobDownload] dataUrl has no comma'); return; }
+          var header = dataUrl.substring(5, idx);
+          var parts = header.split(';');
+          var mime = parts[0] || 'application/octet-stream';
+          var b64 = dataUrl.substring(idx + 1);
+          cb(mime, b64);
+        };
+        reader.onerror = function(e) {
+          bridge.log('[BlobDownload] FileReader error: ' + e);
+        };
+        reader.readAsDataURL(blob);
+      }).catch(function(e) {
+        bridge.log('[BlobDownload] fetch error: ' + (e && e.message || e));
+      });
+    } catch(e) {
+      bridge.log('[BlobDownload] readAsBase64 exception: ' + e);
+    }
+  }
+
+  function ensureExtension(fileName, mime) {
+    if (/\.[a-z0-9]+$/i.test(fileName)) return fileName;
+    var extMap = {
+      'application/epub+zip': 'epub',
+      'application/pdf': 'pdf',
+      'application/vnd.amazon.ebook': 'azw',
+      'application/x-mobipocket-ebook': 'mobi',
+      'text/plain': 'txt',
+      'application/zip': 'zip',
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp'
+    };
+    var ext = extMap[mime] || 'bin';
+    return fileName + '.' + ext;
+  }
+
+  document.addEventListener('click', function(e) {
+    var a = e.target;
+    while (a && a.tagName !== 'A') a = a.parentNode;
+    if (!a || a.tagName !== 'A') return;
+    var href = a.href || '';
+    if (!href) return;
+    var isBlob = href.indexOf('blob:') === 0;
+    var isData = href.indexOf('data:') === 0;
+    if (!isBlob && !isData) return;
+    if (!a.hasAttribute('download')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var downloadName = a.getAttribute('download') || 'download';
+    bridge.log('[BlobDownload] intercepted <a download> click: ' + href.substring(0, 60));
+    readAsBase64(href, function(mime, b64) {
+      var fileName = ensureExtension(downloadName, mime);
+      bridge.saveBlob(fileName, mime, b64);
+    });
+  }, true);
+
+  var origAnchorClick = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function() {
+    var href = this.href || '';
+    var isBlob = href.indexOf('blob:') === 0;
+    var isData = href.indexOf('data:') === 0;
+    if ((isBlob || isData) && this.hasAttribute && this.hasAttribute('download')) {
+      var downloadName = (this.getAttribute && this.getAttribute('download')) || 'download';
+      bridge.log('[BlobDownload] intercepted a.click(): ' + href.substring(0, 60));
+      readAsBase64(href, function(mime, b64) {
+        var fileName = ensureExtension(downloadName, mime);
+        bridge.saveBlob(fileName, mime, b64);
+      });
+      return;
+    }
+    return origAnchorClick.apply(this, arguments);
+  };
+
+  bridge.log('[BlobDownload] intercept script installed');
+})();
+"""
     }
 
     /** 禁用 WryActivity 默认返回键逻辑，自己实现 */
@@ -274,7 +395,16 @@ class MainActivity : TauriActivity() {
         wv.webViewClient = ShellWebViewClient()
         wv.webChromeClient = ShellWebChromeClient()
         wv.setDownloadListener(ShellDownloadListener())
-        Log.i(TAG, "custom clients installed")
+
+        // 注入 blob 下载桥：JS 端拦截 <a download> 点击和 createObjectURL，
+        // 把 blob 数据 base64 编码后通过 JavascriptInterface 回传给 Kotlin。
+        // 注意：wry 之前调过 addJavascriptInterface(ipc, "ipc")，我们用不同的名字
+        // AndroidBlobDownloader，避免冲突。
+        wv.addJavascriptInterface(BlobDownloadBridge(wv), BLOB_BRIDGE_NAME)
+        // 注入拦截脚本（在每个页面加载前/后执行）
+        wv.evaluateJavascript(BLOB_INTERCEPT_SCRIPT, null)
+
+        Log.i(TAG, "custom clients installed (with blob download bridge)")
     }
 
     // =====================================================================================
@@ -344,6 +474,8 @@ class MainActivity : TauriActivity() {
                     firstPageLoaded = true
                 }
             }
+            // 每次页面加载完成后重新注入 blob 拦截脚本（SPA 路由切换后会失效）
+            view?.evaluateJavascript(BLOB_INTERCEPT_SCRIPT, null)
             CookieManager.getInstance().flush()
         }
 
@@ -445,6 +577,22 @@ class MainActivity : TauriActivity() {
         mimetype: String,
         contentLength: Long
     ) {
+        // blob: URL 不能直接交给 DownloadManager（它走 HTTP 协议，拿不到 blob 数据）。
+        // 这种情况由注入的 BLOB_INTERCEPT_SCRIPT 拦截处理：JS 端读取 blob 内容、
+        // base64 编码后通过 BlobDownloadBridge.saveBlob() 回传到 Kotlin 写文件。
+        // 这里只做兜底提示。
+        if (url.startsWith("blob:", ignoreCase = true)) {
+            Log.w(TAG, "blob: URL reached DownloadListener, JS intercept may have failed: $url")
+            Toast.makeText(this, "正在准备下载…", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        // data: URL（base64 内联）：解码后直接写文件
+        if (url.startsWith("data:", ignoreCase = true)) {
+            saveDataUrl(url, contentDisposition, mimetype)
+            return
+        }
+
         try {
             val request = DownloadManager.Request(Uri.parse(url)).apply {
                 setMimeType(mimetype.takeIf { it.isNotBlank() } ?: "*/*")
@@ -469,6 +617,119 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    /**
+     * 处理 data: URL（base64 内联数据），解码后写入 Download 目录。
+     * 格式：data:[<mimetype>][;base64],<data>
+     */
+    private fun saveDataUrl(dataUrl: String, contentDisposition: String, fallbackMime: String) {
+        try {
+            val commaIdx = dataUrl.indexOf(',')
+            if (commaIdx < 0) {
+                Toast.makeText(this, "下载失败：data URL 格式错误", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val header = dataUrl.substring(5, commaIdx)  // 去掉 "data:" 前缀
+            val payload = dataUrl.substring(commaIdx + 1)
+            val parts = header.split(";")
+            val mime = parts.firstOrNull { it.contains("/") } ?: fallbackMime
+            val isBase64 = parts.any { it.equals("base64", true) }
+
+            val fileName = URLUtil.guessFileName("", contentDisposition, mime)
+            val bytes = if (isBase64) Base64.decode(payload, Base64.DEFAULT) else payload.toByteArray()
+            writeBytesToDownloads(fileName, bytes, mime)
+        } catch (e: Exception) {
+            Log.e(TAG, "saveDataUrl failed", e)
+            Toast.makeText(this, "下载失败：${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /**
+     * 将字节数组写入公共 Download 目录，并通过 MediaScanner 让它立刻出现在系统文件管理器里。
+     * API 29+ 不需要 WRITE_EXTERNAL_STORAGE 权限。
+     */
+    private fun writeBytesToDownloads(fileName: String, bytes: ByteArray, mime: String) {
+        try {
+            val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            if (!downloads.exists()) downloads.mkdirs()
+            // 防止重名覆盖，加序号
+            var target = File(downloads, fileName)
+            var n = 1
+            val dotIdx = fileName.lastIndexOf('.')
+            val base = if (dotIdx > 0) fileName.substring(0, dotIdx) else fileName
+            val ext = if (dotIdx > 0) fileName.substring(dotIdx) else ""
+            while (target.exists()) {
+                target = File(downloads, "$base ($n)$ext")
+                n++
+            }
+            FileOutputStream(target).use { it.write(bytes) }
+
+            // 通知 MediaScanner 扫描，让文件立刻在系统文件管理器里可见
+            val mimeFixed = mime.takeIf { it.isNotBlank() } ?: "*/*"
+            val intent = Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE).apply {
+                data = Uri.fromFile(target)
+                setPackage("com.android.providers.media")
+            }
+            sendBroadcast(intent)
+
+            Toast.makeText(this, "已保存到 Download/${target.name}", Toast.LENGTH_LONG).show()
+            Log.i(TAG, "blob/data saved: ${target.absolutePath} (${bytes.size} bytes)")
+        } catch (e: Exception) {
+            Log.e(TAG, "writeBytesToDownloads failed", e)
+            Toast.makeText(this, "下载失败：${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    // =====================================================================================
+    // Blob 下载桥：JS → Kotlin 回传 blob 数据
+    // =====================================================================================
+
+    /**
+     * JavascriptInterface，注入到 WebView 中供 JS 调用。
+     *
+     * JS 端流程：
+     * 1. 拦截 <a download> 点击 或 createObjectURL 调用
+     * 2. fetch(blobUrl) → response.blob() → FileReader.readAsDataURL → base64
+     * 3. 调用 AndroidBlobDownloader.saveBlob(fileName, mimeType, base64)
+     *
+     * ⚠️ @JavascriptInterface 注解的方法会被暴露给网页 JS，仅保留必要的入口。
+     */
+    inner class BlobDownloadBridge(private val webView: WebView) {
+        @JavascriptInterface
+        fun saveBlob(fileName: String, mimeType: String, base64Data: String) {
+            Log.i(TAG, "saveBlob: fileName=$fileName, mime=$mimeType, base64Length=${base64Data.length}")
+            try {
+                val bytes = Base64.decode(base64Data, Base64.DEFAULT)
+                runOnUiThread {
+                    writeBytesToDownloads(fileName, bytes, mimeType)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "saveBlob decode failed", e)
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "下载失败：${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+
+        /** 调试用：JS 端可以调这个方法打印日志到 logcat */
+        @JavascriptInterface
+        fun log(msg: String) {
+            Log.i(TAG, "[JS] $msg")
+        }
+    }
+
+    /**
+     * 注入到 WebView 的 JS 拦截脚本。
+     *
+     * 拦截策略：
+     * 1. 劫持 window.URL.createObjectURL，记录 blob URL → Blob 的映射，便于后续读取
+     * 2. 监听 document 的 click 事件（捕获阶段），拦截 <a download> 点击：
+     *    - 如果 href 是 blob: 或 data:，fetch 出 Blob 数据，base64 编码，调 saveBlob
+     *    - 阻止默认跳转（避免触发 DownloadListener 报错）
+     * 3. 同时劫持 a.click，覆盖更多触发路径
+     *
+     * 脚本是 IIFE，避免污染全局；幂等，重复注入无副作用（用 window.__blobIntercepted 标记）。
+     */
+
     // =====================================================================================
     // 剪贴板分享链接检测
     // =====================================================================================
@@ -476,22 +737,54 @@ class MainActivity : TauriActivity() {
     private fun checkClipboardForShareLink() {
         try {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-            val clip = cm.primaryClip ?: return
-            if (clip.itemCount == 0) return
+            val clip = cm.primaryClip
+            if (clip == null) {
+                Log.d(TAG, "clipboard: primaryClip is null")
+                return
+            }
+            if (clip.itemCount == 0) {
+                Log.d(TAG, "clipboard: itemCount == 0")
+                return
+            }
             val raw = clip.getItemAt(0).coerceToText(this).toString().trim()
-            if (raw.isEmpty()) return
+            if (raw.isEmpty()) {
+                Log.d(TAG, "clipboard: raw text empty")
+                return
+            }
+            Log.d(TAG, "clipboard raw (first 100 chars): ${raw.take(100)}")
 
-            val urlCandidate = extractFirstUrl(raw) ?: return
-            if (!SHARE_LINK_REGEX.containsMatchIn(urlCandidate)) return
+            // 提取 URL：先找 https?:// 链接，再找 readest:// 深链
+            val urlCandidate = extractFirstUrl(raw)
+            if (urlCandidate == null) {
+                Log.d(TAG, "clipboard: no URL found in text")
+                return
+            }
+            Log.d(TAG, "clipboard extracted url: $urlCandidate")
 
-            if (ClipboardMemory.wasShown(urlCandidate)) return
+            // 匹配 HOME_URL 域名 或 readest:// 深链
+            if (!SHARE_LINK_REGEX.containsMatchIn(urlCandidate)) {
+                Log.d(TAG, "clipboard: URL does not match share link regex ($SHARE_LINK_REGEX)")
+                return
+            }
 
+            if (ClipboardMemory.wasShown(urlCandidate)) {
+                Log.d(TAG, "clipboard: already shown this URL in this process, skip")
+                return
+            }
+
+            Log.i(TAG, "clipboard: showing share link dialog for $urlCandidate")
             AlertDialog.Builder(this)
                 .setTitle("检测到书籍分享链接")
                 .setMessage("是否打开？\n$urlCandidate")
                 .setPositiveButton("确定") { _, _ ->
                     ClipboardMemory.markShown(urlCandidate)
-                    webView?.post { webView?.loadUrl(urlCandidate) }
+                    // 如果是 readest:// 深链，走深链转换；否则直接 loadUrl
+                    val loadTarget = if (urlCandidate.startsWith("readest://", ignoreCase = true)) {
+                        convertReadestDeepLink(Uri.parse(urlCandidate))
+                    } else {
+                        urlCandidate
+                    }
+                    webView?.post { webView?.loadUrl(loadTarget) }
                 }
                 .setNegativeButton("取消") { _, _ ->
                     ClipboardMemory.markShown(urlCandidate)
@@ -503,9 +796,18 @@ class MainActivity : TauriActivity() {
         }
     }
 
+    /**
+     * 从剪贴板文本中提取第一个 URL：
+     * - 优先匹配 https?:// 链接
+     * - 其次匹配 readest:// 深链
+     * - 找不到返回 null
+     */
     private fun extractFirstUrl(text: String): String? {
-        val pattern = Regex("https?://[^\\s<>\"]+", RegexOption.IGNORE_CASE)
-        return pattern.find(text)?.value
+        val httpPattern = Regex("https?://[^\\s<>\"]+", RegexOption.IGNORE_CASE)
+        httpPattern.find(text)?.let { return it.value }
+        val deepLinkPattern = Regex("readest://[^\\s<>\"]+", RegexOption.IGNORE_CASE)
+        deepLinkPattern.find(text)?.let { return it.value }
+        return null
     }
 
     // =====================================================================================
