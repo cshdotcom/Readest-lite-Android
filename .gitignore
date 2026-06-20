@@ -1,0 +1,43 @@
+# ===== Rust =====
+target/
+**/*.rs.bk
+Cargo.lock
+
+# ===== Tauri =====
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# ===== Android (generated) =====
+# Tauri 会从 src-tauri/gen/android 重新生成完整 Android 工程；
+# jniLibs 是构建期产物，不该提交。
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/build/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/app/tauri.properties
+
+# ===== 签名（绝对不要提交！=====)
+*.keystore
+*.jks
+*.p12
+keystore.properties
+
+# ===== IDE / OS =====
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# ===== Node =====
+node_modules/
+dist/
+.cache/
+
+# ===== Build outputs =====
+*.apk
+*.aab
+*.aar
+*.dex
+*.class
