@@ -12,7 +12,7 @@
 |------|------|
 | 内核 | 系统 WebView（不内置 Chromium） |
 | 启动 | 直接加载硬编码 `HOME_URL`，无地址栏 / 无导航页 |
-| UI | 全屏渲染，完全依赖系统原生导航条，不自定义状态栏 |
+| UI | 沉浸式全屏，隐藏状态栏 + 导航栏；用户从屏幕边缘内滑可短暂唤出，无操作自动隐藏 |
 | 屏幕方向 | 强制竖屏 |
 | 跳转拦截 | `_blank` / `target=_blank` 统一在 App 内页面栈加载，不会跳出浏览器 |
 | 剪贴板检测 | 前台切换 / 冷启动时读取剪贴板，匹配到 `HOME_URL` 域名链接弹系统询问框；进程内去重，进程销毁自动失效 |
@@ -402,7 +402,21 @@ pkill -f tauri; pkill -f gradle; pkill -f kotlin
 
 修改 `AndroidManifest.xml` 里 `MainActivity` 的 `android:screenOrientation="portrait"`，改为 `"unspecified"` 或 `"fullSensor"`。
 
-### Q7. 想加回 x86 / x86_64（模拟器支持）
+### Q7. 关闭沉浸式全屏（让状态栏/导航栏常驻）
+
+App 默认进入沉浸式全屏（状态栏 + 导航栏都隐藏）。如果你希望系统栏常驻可见，做两处修改：
+
+1. **`MainActivity.kt`**：删除以下三个调用点的 `hideSystemBars()`：
+   - `onCreate` 末尾
+   - `onResume` 开头
+   - `onWebViewCreate` 的 `post { }` 块末尾
+   - `onWindowFocusChanged` 整个方法可删除
+
+2. **`themes.xml`**（values 和 values-night 两份）：把 `<item name="android:windowFullscreen">true</item>` 改回 `false`。
+
+3. （可选）在 `onCreate` 里恢复 `enableEdgeToEdge()` 调用（需要 import `androidx.activity.enableEdgeToEdge`），让系统栏透明、内容延伸到系统栏下方，获得更现代的视觉。
+
+### Q8. 想加回 x86 / x86_64（模拟器支持）
 
 修改两处：
 
@@ -421,7 +435,7 @@ rustup target add x86_64-linux-android i686-linux-android
 npm run tauri android build -- --apk --target aarch64 armv7 x86_64 i686 --split-per-abi --ci
 ```
 
-### Q8. 想上架 Google Play
+### Q9. 想上架 Google Play
 
 需要 AAB 格式而非 APK：
 

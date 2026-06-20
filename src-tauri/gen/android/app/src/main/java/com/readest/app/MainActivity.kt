@@ -24,12 +24,14 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import kotlin.system.exitProcess
 
 /**
@@ -129,8 +131,13 @@ class MainActivity : TauriActivity() {
             }
         }
 
-        enableEdgeToEdge()
+        // 注意：不再调用 enableEdgeToEdge()，那是让系统栏透明可见的 API；
+        // 我们要的是相反效果——隐藏状态栏 + 导航栏，进入沉浸式全屏。
         super.onCreate(savedInstanceState)
+
+        // 配置沉浸式全屏：WindowCompat.setDecorFitsDecorFitsSystemWindows(false) 让内容延伸到系统栏下方，
+        // WindowInsetsControllerCompat.hide() 真正隐藏系统栏。
+        hideSystemBars()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -146,6 +153,38 @@ class MainActivity : TauriActivity() {
         // 冷启动剪贴板检测
         checkClipboardForShareLink()
         coldStartDone = true
+    }
+
+    /**
+     * 隐藏状态栏 + 导航栏，进入沉浸式全屏。
+     *
+     * 行为说明：
+     * - 系统栏完全隐藏，WebView 内容占据整块屏幕
+     * - 用户从屏幕边缘向内滑动会短暂唤出系统栏（沉浸式粘性 BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE）
+     * - 唤出后无操作 1-2 秒自动重新隐藏
+     * - 弹窗（文件选择器、对话框等）关闭后系统栏可能恢复，需要在 onWindowFocusChanged 重新调用
+     * - 从后台切回前台也会恢复，需要在 onResume 重新调用
+     *
+     * 兼容性：WindowInsetsControllerCompat 是 androidx.core 1.5+ 提供的统一 API，
+     * 内部会自动按 API 版本分发到 WindowInsetsController（API 30+）或老的 systemUiFlags（API 26-29）。
+     */
+    private fun hideSystemBars() {
+        val window = window ?: return
+        // 让内容延伸到系统栏下方（不预留空间）
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        // 隐藏状态栏 + 导航栏
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+        // 沉浸式粘性：滑动可短暂唤出，自动隐藏
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // 弹窗/通知/其他 Activity 返回后，系统栏可能恢复，重新隐藏
+        if (hasFocus) {
+            hideSystemBars()
+        }
     }
 
     /**
@@ -181,6 +220,8 @@ class MainActivity : TauriActivity() {
                 Log.i(TAG, "deep link detected, loading $initialUrl")
                 webView.loadUrl(initialUrl)
             }
+            // WebView 创建完成后再隐藏一次系统栏（wry 的 setContentView 之后 decorView 才稳定）
+            hideSystemBars()
         }
     }
 
@@ -194,6 +235,8 @@ class MainActivity : TauriActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 从后台切回前台时系统栏会自动恢复，重新隐藏
+        hideSystemBars()
         if (coldStartDone) {
             checkClipboardForShareLink()
         }
