@@ -377,7 +377,16 @@ class MainActivity : TauriActivity() {
     private var webView: WebView? = null
     private var firstPageLoaded = false
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
-    private lateinit var fileChooserLauncher: ActivityResultLauncher<Array<String>>
+
+    /**
+     * 文件上传 launcher：用 GetMultipleContents（接受任意文件，无 MIME 严格过滤）。
+     *
+     * 历史教训：之前用 OpenMultipleDocuments，它按 MIME 严格过滤，
+     * 导致网页声明的 epub 等 MIME 在系统 SAF 选择器里找不到提供方，
+     * 报"不支持的格式"。改用 GetMultipleContents 传通配 MIME 后用户可选任意文件。
+     */
+    private lateinit var fileChooserLauncher: ActivityResultLauncher<String>
+
     private var pendingDownload: PendingDownload? = null
     private var coldStartDone = false
 
@@ -400,21 +409,18 @@ class MainActivity : TauriActivity() {
     // =====================================================================================
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // registerForActivityResult 必须在 super.onCreate 之前注册
+        // registerForActivityResult 必须在 super.onCreate 之前注册。
+        // 用 GetMultipleContents：接受单个 MIME 字符串（传 "*/*" 即可选任意文件），
+        // 比 OpenMultipleDocuments 更宽松，不会因 MIME 严格过滤导致"不支持的格式"。
         fileChooserLauncher = registerForActivityResult(
-            ActivityResultContracts.OpenMultipleDocuments()
+            ActivityResultContracts.GetMultipleContents()
         ) { uris ->
             val cb = fileUploadCallback
             fileUploadCallback = null
             if (uris != null && uris.isNotEmpty()) {
-                uris.forEach { u ->
-                    runCatching {
-                        contentResolver.takePersistableUriPermission(
-                            u,
-                            Intent.FLAG_GRANT_READ_URI_PERMISSION
-                        )
-                    }
-                }
+                // GetMultipleContents 返回的 Uri 通常是 content://，没有持久化读权限；
+                // 但 WebView 上传流程是一次性的（用户选完立即上传），不需要 takePersistableUriPermission。
+                // 如果网页后续还想读这个 Uri（少见），网页层应自己把文件复制到 IndexedDB。
                 cb?.onReceiveValue(uris.toTypedArray())
             } else {
                 cb?.onReceiveValue(null)
@@ -798,11 +804,15 @@ class MainActivity : TauriActivity() {
             fileUploadCallback?.onReceiveValue(null)
             fileUploadCallback = filePathCallback
 
-            val acceptTypes = fileChooserParams?.acceptTypes?.takeIf { it.isNotEmpty() && it.any { t -> t.isNotBlank() } }
-                ?: arrayOf("*/*")
+            // 关键：强制传 "*/*"，忽略网页声明的 acceptTypes。
+            // 网页可能声明 application/epub+zip 等罕见 MIME，Android 系统 SAF 选择器
+            // 严格按 MIME 过滤后会找不到能提供该类型的 app，弹出"不支持的格式"。
+            // 强制 "*/*" 让用户选任意文件，由网页自己判断是否合法。
+            // GetMultipleContents 接受单个 MIME 字符串，不是数组。
+            val mime = "*/*"
 
             return try {
-                fileChooserLauncher.launch(acceptTypes)
+                fileChooserLauncher.launch(mime)
                 true
             } catch (e: Exception) {
                 Log.w(TAG, "file chooser launch failed", e)

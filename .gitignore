@@ -41,3 +41,11 @@ dist/
 *.aar
 *.dex
 *.class
+
+# ===== 临时文件 / 工作目录 =====
+download/
+release_notes.md
+scripts/
+assets/
+worklog.md
+skills/
