@@ -2,7 +2,7 @@
 
 一个基于 **Tauri v2** 的极简 Android 阅读壳 App。它不内置 Chromium，直接调用 Android 系统 WebView 加载你硬编码的阅读站点地址，体积小、启动快、行为可控。
 
-适合所有自部署的网页版阅读器（如 [Readest](https://github.com/readest/readest)、Kavita、Komga、Calibre-Web 等），把任意阅读站点"封装"成原生 App 体验。
+适合所有自部署的网页版阅读器（如 [Readest](https://github.com/cshdotcom/readest-lite)、Kavita、Komga、Calibre-Web 等），把任意阅读站点"封装"成原生 App 体验。
 
 ---
 
@@ -513,7 +513,7 @@ MIT License — 随便用，作者不承担任何责任。
 
 - [Tauri](https://tauri.app) — 极简跨平台桌面/移动应用框架
 - [wry](https://github.com/tauri-apps/wry) — Tauri 的 WebView 抽象层
-- [Readest](https://github.com/readest/readest) — 灵感来源（本项目用于把 Readest 网页版封装成 Android App）
+- [Readest](https://github.com/cshdotcom/readest-lite) — 灵感来源（本项目用于把 Readest 网页版封装成 Android App）
 
 ---
 
