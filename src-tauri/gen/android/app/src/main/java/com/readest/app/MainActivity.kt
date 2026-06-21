@@ -506,6 +506,7 @@ class MainActivity : TauriActivity() {
             installCustomClients(webView)
             // 兜底：如果 wry 没自动加载 URL（或加载了 tauri://），强制加载 HOME_URL
             val current = webView.url
+            Log.i(TAG, "onWebViewCreate post: current url = $current")
             if (current.isNullOrBlank() || current.startsWith("tauri://") || current.startsWith("about:blank")) {
                 Log.i(TAG, "current url is $current, fallback to $HOME_URL")
                 webView.loadUrl(HOME_URL)
@@ -519,6 +520,27 @@ class MainActivity : TauriActivity() {
             // WebView 创建完成后再隐藏一次系统栏（wry 的 setContentView 之后 decorView 才稳定）
             hideSystemBars()
         }
+
+        // 3. 二次兜底：500ms 后再次检查 URL，如果还是 tauri:// 或空白，强制加载 HOME_URL
+        //    防止 wry 的 loadUrlMainThread 在我们的 post 之后执行覆盖了 HOME_URL
+        webView.postDelayed({
+            val current = webView.url
+            Log.i(TAG, "500ms check: current url = $current")
+            if (current.isNullOrBlank() || current.startsWith("tauri://") || current.startsWith("about:blank")) {
+                Log.w(TAG, "500ms check: still $current, force loading $HOME_URL")
+                webView.loadUrl(HOME_URL)
+            }
+        }, 500)
+
+        // 4. 三次兜底：2s 后最后检查一次
+        webView.postDelayed({
+            val current = webView.url
+            Log.i(TAG, "2s check: current url = $current")
+            if (current.isNullOrBlank() || current.startsWith("tauri://") || current.startsWith("about:blank")) {
+                Log.w(TAG, "2s check: still $current, force loading $HOME_URL")
+                webView.loadUrl(HOME_URL)
+            }
+        }, 2000)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -649,6 +671,15 @@ class MainActivity : TauriActivity() {
                 isLoadingErrorPage = false  // 错误页已稳定显示，重置标志
                 return
             }
+            // 关键修复：wry 创建 WebView 后会加载 tauri://localhost（编译进 APK 的 splash 页），
+            // 即使 tauri.conf.json 配了 External URL，wry 的 loadUrl 和我们的 post { loadUrl }
+            // 时序不确定，可能导致 tauri://localhost 覆盖 HOME_URL → 白屏。
+            // 这里兜底：检测到 tauri:// 立即跳转 HOME_URL。
+            if (url != null && (url.startsWith("tauri://") || url == "about:blank")) {
+                Log.w(TAG, "detected $url in onPageFinished, redirecting to $HOME_URL")
+                view?.post { view?.loadUrl(HOME_URL) }
+                return
+            }
             // 首页加载完成后清空历史，让返回键的"页面栈仅剩主页"判定生效
             if (!firstPageLoaded && url != null && (url == HOME_URL || url.startsWith(HOME_URL))) {
                 view?.post {
@@ -659,6 +690,15 @@ class MainActivity : TauriActivity() {
             // 每次页面加载完成后重新注入 blob 拦截脚本（SPA 路由切换后会失效）
             view?.evaluateJavascript(BLOB_INTERCEPT_SCRIPT, null)
             CookieManager.getInstance().flush()
+        }
+
+        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+            super.onPageStarted(view, url, favicon)
+            // 双保险：onPageStarted 也检测 tauri:// 立即跳转
+            if (url != null && url.startsWith("tauri://")) {
+                Log.w(TAG, "detected tauri:// in onPageStarted, redirecting to $HOME_URL")
+                view?.post { view?.loadUrl(HOME_URL) }
+            }
         }
 
         override fun onReceivedError(

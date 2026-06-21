@@ -16,7 +16,7 @@ open class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
-        val executable = """npm""";
+        val executable = """node""";
         try {
             runTauriCli(executable)
         } catch (e: Exception) {
@@ -48,11 +48,13 @@ open class BuildTask : DefaultTask() {
         val rootDirRel = rootDirRel ?: throw GradleException("rootDirRel cannot be null")
         val target = target ?: throw GradleException("target cannot be null")
         val release = release ?: throw GradleException("release cannot be null")
-        val args = listOf("run", "--", "tauri", "android", "android-studio-script");
+        // 用 npm run tauri 调用，避免 node tauri 找不到模块的问题
+        // package.json 的 scripts.ta uri = "tauri"，npm 会自动找 node_modules/.bin/tauri
+        val args = listOf("run", "tauri", "--", "android", "android-studio-script");
 
         project.exec {
             workingDir(File(project.projectDir, rootDirRel))
-            executable(executable)
+            executable("npm")
             args(args)
             if (project.logger.isEnabled(LogLevel.DEBUG)) {
                 args("-vv")
